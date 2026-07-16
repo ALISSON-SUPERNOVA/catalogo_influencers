@@ -1,0 +1,6 @@
+{
+  "name": "Catálogo de Influenciadores",
+  "description": "Catálogo dinâmico de influenciadores para o portfólio corporativo da Supernova.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

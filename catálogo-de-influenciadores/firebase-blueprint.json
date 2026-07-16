@@ -1,0 +1,32 @@
+{
+  "entities": {
+    "Influencer": {
+      "title": "Influencer",
+      "description": "Represents a social media influencer",
+      "type": "object",
+      "properties": {
+        "nome": { "type": "string" },
+        "link_perfil": { "type": "string" },
+        "seguidores": { "type": "number" },
+        "categoria_sobre": { "type": "string" },
+        "classificacao": { "type": "string" },
+        "engajamento": { "type": "number" },
+        "preco_estimado": { "type": "number" },
+        "is_favorito": { "type": "boolean" },
+        "updated_at": { "type": "string" },
+        "publico_alvo": { "type": "string" },
+        "rede_social": { "type": "string" },
+        "foto_url": { "type": "string" },
+        "grupo": { "type": "string" },
+        "media_valor": { "type": "string" }
+      },
+      "required": ["nome", "link_perfil"]
+    }
+  },
+  "firestore": {
+    "/influencers/{influencerId}": {
+      "schema": "Influencer",
+      "description": "Collection of influencers"
+    }
+  }
+}
