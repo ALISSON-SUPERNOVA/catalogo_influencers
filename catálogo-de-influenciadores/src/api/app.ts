@@ -22,6 +22,10 @@ const USER_AVATARS_BUCKET = "user-avatars";
 // mount this same app, so the route logic only lives in one place.
 export const app = express();
 
+// Trust the platform's proxy (Vercel, or any reverse proxy in front locally) so req.ip
+// reflects the real client IP from X-Forwarded-For — needed for per-IP login lockout to work.
+app.set("trust proxy", true);
+
 app.use(express.json({ limit: "10mb" }));
 
 // Helper to classify influencer based on followers count
