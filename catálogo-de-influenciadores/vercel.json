@@ -1,0 +1,10 @@
+{
+  "buildCommand": "vite build",
+  "outputDirectory": "dist",
+  "crons": [
+    {
+      "path": "/api/apify-sync",
+      "schedule": "0 0 * * *"
+    }
+  ]
+}
