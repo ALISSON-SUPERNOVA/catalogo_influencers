@@ -1,6 +1,9 @@
 {
   "buildCommand": "vite build",
   "outputDirectory": "dist",
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api" }
+  ],
   "crons": [
     {
       "path": "/api/apify-sync",
