@@ -1,25 +1,24 @@
 import cron from "node-cron";
-import { db, storage } from "../lib/firebase.js";
-import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
-import { 
-  dbGetAll, 
-  dbUpdateApifyMatches, 
-  getInfluencerPhoto 
-} from "../lib/dbFallback.js";
+import { supabaseStorage, PHOTOS_BUCKET } from "../lib/supabase.js";
+import {
+  backfillInstagramHandles,
+  getInstagramProfilesNeedingSync,
+  applyApifySyncResult,
+  extractHandle
+} from "../lib/db.js";
 
-// Helper to classify influencer based on followers count
-function classifyInfluencer(followers: number): string {
-  if (followers >= 0 && followers <= 999) return "Nanoinfluenciador";
-  if (followers >= 1000 && followers <= 99999) return "Microinfluenciador";
-  if (followers >= 100000 && followers <= 999999) return "Macro influencidor";
-  return "Mega influenciador";
-}
+// Profiles synced within the last SYNC_STALE_DAYS are skipped, so a manual
+// admin trigger the same day the daily cron already ran doesn't burn extra
+// Apify credits re-fetching profiles that are still fresh.
+const SYNC_STALE_DAYS = 1;
+
+const APIFY_ACTOR = "apify~instagram-profile-scraper";
 
 // Global state tracking the status of the sync
 export let currentSync = {
   isSyncing: false,
   progress: 0,
-  step: "idle", // 'idle' | 'extracting' | 'triggering' | 'polling' | 'saving' | 'success' | 'error'
+  step: "idle", // 'idle' | 'extracting' | 'syncing' | 'saving' | 'success' | 'error'
   elapsed: 0,
   error: null as string | null,
   updatedCount: 0
@@ -43,7 +42,7 @@ export function resetSyncState() {
 }
 
 export function getApifyToken(): string {
-  return (process.env.APIFY_TOKEN || process.env.APIFY_API_TOKEN || "apify_api_My1hkp7k9gnbagYQI1zHfNiAjsmjkh42aO5Z").trim();
+  return (process.env.APIFY_TOKEN || process.env.APIFY_API_TOKEN || "").trim();
 }
 
 export function validateApifyCredentials() {
@@ -58,23 +57,9 @@ export function validateApifyCredentials() {
   }
 }
 
-export function extractCleanUsername(urlOrUsername: string): string {
-  if (!urlOrUsername) return "";
-  let input = urlOrUsername.trim();
-  
-  // If it's a URL, extract the last non-empty segment before query params
-  if (input.includes("/") || input.includes("instagram.com")) {
-    let cleanUrl = input.split("?")[0];
-    cleanUrl = cleanUrl.replace(/\/+$/, "");
-    const parts = cleanUrl.split("/");
-    input = parts[parts.length - 1] || "";
-  }
-  
-  // Clean @ character and any spaces, convert to lowercase
-  return input.replace(/@/g, "").replace(/\s+/g, "").toLowerCase();
-}
+export const extractCleanUsername = extractHandle;
 
-// Helper to download an image from a URL and upload it permanently to Firebase Storage
+// Helper to download an image from a URL and upload it permanently to Supabase Storage
 export async function downloadAndUploadProfilePic(influencerId: string, photoUrl: string): Promise<string> {
   try {
     console.log(`[STORAGE] Iniciando download da imagem de perfil de: ${photoUrl}`);
@@ -92,29 +77,59 @@ export async function downloadAndUploadProfilePic(influencerId: string, photoUrl
     }
     const arrayBuffer = await response.arrayBuffer();
     const buffer = new Uint8Array(arrayBuffer);
-    
-    // Clean and define the target path inside the Firebase Storage bucket
+
+    // Clean and define the target path inside the Supabase Storage bucket
     const cleanId = influencerId.replace(/[^a-zA-Z0-9_-]/g, "");
     const storagePath = `influencers/${cleanId}_profile.jpg`;
-    console.log(`[STORAGE] Fazendo upload do arquivo de imagem para Firebase Storage: ${storagePath}`);
-    
-    const storageRef = ref(storage, storagePath);
-    const uploadResult = await uploadBytes(storageRef, buffer, {
-      contentType: "image/jpeg",
-      customMetadata: {
-        downloadedAt: new Date().toISOString(),
-        originalUrl: photoUrl,
-        influencerId: influencerId
-      }
-    });
-    
-    const permanentUrl = await getDownloadURL(uploadResult.ref);
-    console.log(`[STORAGE] Upload bem sucedido! URL permanente obtida: ${permanentUrl}`);
-    return permanentUrl;
+    console.log(`[STORAGE] Fazendo upload do arquivo de imagem para Supabase Storage: ${storagePath}`);
+
+    const { error: uploadError } = await supabaseStorage.storage
+      .from(PHOTOS_BUCKET)
+      .upload(storagePath, buffer, {
+        contentType: "image/jpeg",
+        upsert: true
+      });
+
+    if (uploadError) {
+      throw new Error(uploadError.message);
+    }
+
+    const { data: publicUrlData } = supabaseStorage.storage.from(PHOTOS_BUCKET).getPublicUrl(storagePath);
+    console.log(`[STORAGE] Upload bem sucedido! URL permanente obtida: ${publicUrlData.publicUrl}`);
+    return publicUrlData.publicUrl;
   } catch (err: any) {
     console.error(`[STORAGE] Erro ao baixar ou salvar imagem de perfil no Storage para o influenciador ${influencerId}:`, err.message || err);
     throw err;
   }
+}
+
+// Single blocking call: Apify runs the actor and hands back the dataset items directly,
+// so there's no separate trigger/poll/fetch-dataset dance to manage here.
+async function fetchInstagramProfiles(usernames: string[], token: string): Promise<any[]> {
+  const url = `https://api.apify.com/v2/acts/${APIFY_ACTOR}/run-sync-get-dataset-items?token=${token}`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ usernames })
+  });
+
+  if (res.status === 401 || res.status === 403) {
+    console.error("[APIFY] CHAVE DE API (TOKEN) REJEITADA PELO APIFY! Status HTTP:", res.status);
+    throw new Error(`Erro de Autenticação: A chave do Apify (API Token) foi rejeitada (HTTP ${res.status}). Configure a chave real em APIFY_TOKEN.`);
+  }
+
+  if (res.status === 402) {
+    console.error("[APIFY] ERRO DE COTA/CRÉDITO NO APIFY! Status HTTP 402");
+    throw new Error("Erro de Cota: O limite de créditos da conta do Apify foi excedido (HTTP 402).");
+  }
+
+  if (!res.ok) {
+    console.error(`[APIFY] Falha ao executar o Instagram Profile Scraper. Status HTTP: ${res.status}`);
+    throw new Error(`Falha ao executar o Instagram Profile Scraper no Apify: HTTP ${res.status}`);
+  }
+
+  return await res.json() as any[];
 }
 
 // Primary execution sync function
@@ -135,247 +150,93 @@ export async function runApifySync() {
   const timer = setInterval(() => {
     if (currentSync.isSyncing) {
       currentSync.elapsed += 1;
-      // Incremental progress visualization
-      if (currentSync.step === "polling" && currentSync.progress < 85) {
-        currentSync.progress = Math.min(85, currentSync.progress + Math.ceil(Math.random() * 2));
-      }
     }
   }, 1000);
 
   try {
-    // 1. Validate API credentials at the very beginning
     validateApifyCredentials();
     const token = getApifyToken();
 
-    console.log("[APIFY] Buscando URLs do banco de dados para sincronização...");
-    
-    // Extract and clean usernames
-    const allInfluencers = await dbGetAll();
-    const usernames = allInfluencers.map(inf => {
-      return extractCleanUsername(inf.link_perfil || "");
-    }).filter(Boolean);
+    console.log("[APIFY] Preenchendo handle_normalizado ausente e buscando perfis do Instagram pendentes de sincronização...");
+    await backfillInstagramHandles();
+    const profiles = await getInstagramProfilesNeedingSync(SYNC_STALE_DAYS);
 
-    if (usernames.length === 0) {
-      throw new Error("Nenhum influenciador cadastrado possui link de perfil para extrair username.");
+    if (profiles.length === 0) {
+      console.log("[APIFY] Nenhum perfil do Instagram precisa de sincronização no momento.");
+      currentSync.progress = 100;
+      currentSync.step = "success";
+      currentSync.updatedCount = 0;
+      currentSync.isSyncing = false;
+      clearInterval(timer);
+      return { success: true, updatedCount: 0 };
     }
 
-    currentSync.progress = 15;
-    currentSync.step = "triggering";
+    currentSync.progress = 20;
+    currentSync.step = "syncing";
 
-    // 2. POST to trigger actor run
-    const triggerUrl = `https://api.apify.com/v2/actor-runs/cmLiDQdn1NPjzKIGO?token=${token}`;
-    console.log("[APIFY] Disparando execução do robô com usuários:", usernames);
-    
-    const triggerRes = await fetch(triggerUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        includeAboutSection: false,
-        usernames: usernames
-      })
-    });
+    const usernames = profiles.map(p => p.handle_normalizado).filter(Boolean) as string[];
+    console.log(`[APIFY] Disparando execução do robô com ${usernames.length} usuário(s):`, usernames);
 
-    if (triggerRes.status === 401 || triggerRes.status === 403) {
-      console.error("[APIFY] CHAVE DE API (TOKEN) REJEITADA PELO APIFY! Verifique se inseriu a chave real nas configurações do projeto. Status HTTP:", triggerRes.status);
-      throw new Error(`Erro de Autenticação: A chave do Apify (API Token) enviada foi rejeitada (HTTP ${triggerRes.status}). Configure a chave real em APIFY_TOKEN nas configurações do projeto.`);
-    }
+    const items = await fetchInstagramProfiles(usernames, token);
+    console.log(`[APIFY] Recebeu ${items.length} resultado(s) do dataset. Aplicando atualizações...`);
 
-    if (triggerRes.status === 402) {
-      console.error("[APIFY] ERRO DE COTA/CRÉDITO NO APIFY! Limite de cota atingido ou assinatura expirada. Status HTTP 402");
-      throw new Error("Erro de Cota: O limite de requisições ou créditos da conta do Apify foi excedido (HTTP 402). Por favor, verifique seus créditos no Apify.");
-    }
-
-    if (!triggerRes.ok) {
-      console.error(`[APIFY] Falha ao disparar o robô. Status HTTP: ${triggerRes.status}`);
-      throw new Error(`Falha ao disparar o robô no Apify: HTTP ${triggerRes.status}`);
-    }
-
-    currentSync.progress = 30;
-    currentSync.step = "polling";
-
-    // 3. Polling status check every 5 seconds (Max 120s timeout)
-    const startTime = Date.now();
-    let succeeded = false;
-
-    while (Date.now() - startTime < 120000) {
-      const getRunUrl = `https://api.apify.com/v2/actor-runs/cmLiDQdn1NPjzKIGO?token=${token}`;
-      const statusRes = await fetch(getRunUrl);
-      
-      if (statusRes.status === 401 || statusRes.status === 403) {
-        console.error("[APIFY] CHAVE DE API (TOKEN) REJEITADA DURANTE CONSULTA DE STATUS! Status HTTP:", statusRes.status);
-        throw new Error(`Erro de Autenticação: A chave do Apify (API Token) foi rejeitada durante a consulta de status (HTTP ${statusRes.status}).`);
-      }
-
-      if (statusRes.status === 402) {
-        console.error("[APIFY] ERRO DE COTA/CRÉDITO NO APIFY DURANTE CONSULTA DE STATUS! Status HTTP 402");
-        throw new Error("Erro de Cota: Limite de cota ou créditos excedidos no Apify (HTTP 402).");
-      }
-
-      if (!statusRes.ok) {
-        throw new Error(`Erro ao checar status da execução no Apify: HTTP ${statusRes.status}`);
-      }
-
-      const statusData = await statusRes.json() as any;
-      const runStatus = statusData.status || (statusData.data && statusData.data.status);
-      console.log(`[APIFY] Run status check: ${runStatus}`);
-
-      if (runStatus === "SUCCEEDED") {
-        succeeded = true;
-        break;
-      } else if (runStatus === "FAILED" || runStatus === "ABORTED") {
-        throw new Error(`A execução do robô no Apify falhou ou foi abortada com status: ${runStatus}`);
-      }
-
-      await new Promise(resolve => setTimeout(resolve, 5000));
-    }
-
-    // Abort Run Safety Timeout handling
-    if (!succeeded) {
-      console.warn("[APIFY] Polling ultrapassou o limite de 120s. Enviando comando de cancelamento...");
-      const abortUrl = `https://api.apify.com/v2/actor-runs/cmLiDQdn1NPjzKIGO/abort?token=${token}`;
-      try {
-        await fetch(abortUrl, { method: "POST" });
-        console.log("[APIFY] Comando de cancelamento enviado com sucesso.");
-      } catch (abortErr: any) {
-        console.error("[APIFY] Erro ao enviar comando de abortar:", abortErr.message);
-      }
-      throw new Error("Tempo limite de 120 segundos atingido para sincronização do robô.");
-    }
-
-    currentSync.progress = 85;
+    currentSync.progress = 80;
     currentSync.step = "saving";
 
-    // 4. Collect dataset items
-    const datasetUrl = `https://api.apify.com/v2/datasets/0S4dgMYjDWATz8kdE/items?token=${token}`;
-    const datasetRes = await fetch(datasetUrl);
-    
-    if (datasetRes.status === 401 || datasetRes.status === 403) {
-      console.error("[APIFY] CHAVE DE API (TOKEN) REJEITADA DURANTE OBTENÇÃO DO DATASET! Status HTTP:", datasetRes.status);
-      throw new Error(`Erro de Autenticação: A chave do Apify (API Token) foi rejeitada ao coletar os resultados (HTTP ${datasetRes.status}).`);
-    }
-
-    if (datasetRes.status === 402) {
-      console.error("[APIFY] ERRO DE COTA/CRÉDITO NO APIFY AO COLETAR DATASET! Status HTTP 402");
-      throw new Error("Erro de Cota: Limite de cota ou créditos excedidos no Apify (HTTP 402).");
-    }
-
-    if (!datasetRes.ok) {
-      throw new Error(`Falha ao obter itens do dataset do Apify: HTTP ${datasetRes.status}`);
-    }
-
-    const items = await datasetRes.json() as any[];
-    console.log(`[APIFY] Buscou com sucesso ${items.length} itens do dataset. Processando atualizações...`);
-
-    const updates: { id: string; seguidores: number; classificacao: string; foto_url?: string }[] = [];
-
-    const normalizeUrl = (u: string) => {
-      if (!u) return "";
-      let clean = u.toLowerCase().trim().split("?")[0].replace(/\/$/, "");
-      clean = clean.replace("www.", "").replace("https://", "").replace("http://", "");
-      return clean;
-    };
-
-    const getHandle = (u: string) => {
-      if (!u) return "";
-      const norm = normalizeUrl(u);
-      const parts = norm.split("/");
-      let last = parts[parts.length - 1] || "";
-      last = last.replace("@", "");
-      return last;
-    };
+    const profileByHandle = new Map(profiles.map(p => [p.handle_normalizado, p]));
+    const foundHandles = new Set<string>();
+    let updatedCount = 0;
 
     for (const item of items) {
-      let rawFollowers = item.followersCount ?? item.followers ?? item.followers_count ?? item.subscribers ?? item.subscribersCount ?? item.subscriberCount ?? item.fans ?? item.followerCount;
-      if (rawFollowers === undefined && item.authorMeta && item.authorMeta.fans !== undefined) {
-        rawFollowers = item.authorMeta.fans;
-      }
-      if (rawFollowers === undefined && item.stats && item.stats.followerCount !== undefined) {
-        rawFollowers = item.stats.followerCount;
-      }
+      const itemHandle = extractHandle(item.username || "");
+      const profile = itemHandle ? profileByHandle.get(itemHandle) : undefined;
+      if (!profile) continue;
 
-      if (rawFollowers === undefined) continue;
-
-      let followersCount = 0;
-      if (typeof rawFollowers === "number") {
-        followersCount = rawFollowers;
-      } else if (typeof rawFollowers === "string") {
-        let cleanStr = rawFollowers.trim().toUpperCase();
-        let multiplier = 1;
-        if (cleanStr.endsWith("M")) {
-          multiplier = 1000000;
-          cleanStr = cleanStr.replace("M", "");
-        } else if (cleanStr.endsWith("K")) {
-          multiplier = 1000;
-          cleanStr = cleanStr.replace("K", "");
-        }
-        
-        cleanStr = cleanStr.replace(/\s/g, "");
-        if (cleanStr.includes(",") && cleanStr.includes(".")) {
-          if (cleanStr.indexOf(",") < cleanStr.indexOf(".")) {
-            cleanStr = cleanStr.replace(/,/g, "");
-          } else {
-            cleanStr = cleanStr.replace(/\./g, "").replace(/,/g, ".");
-          }
-        } else if (cleanStr.includes(",")) {
-          const parts = cleanStr.split(",");
-          if (parts[parts.length - 1].length === 3) {
-            cleanStr = cleanStr.replace(/,/g, "");
-          } else {
-            cleanStr = cleanStr.replace(/,/g, ".");
-          }
-        } else if (cleanStr.includes(".")) {
-          const parts = cleanStr.split(".");
-          if (parts[parts.length - 1].length === 3) {
-            cleanStr = cleanStr.replace(/\./g, "");
-          }
-        }
-        followersCount = Math.round(parseFloat(cleanStr) * multiplier) || 0;
+      // Apify returns an item even for profiles it couldn't scrape (private, deleted,
+      // wrong username), shaped like { error: "not_found", errorDescription: "..." }
+      // with no followersCount. Treat that as not-found: skip, don't touch existing data.
+      if (item.error || item.followersCount === undefined || item.followersCount === null) {
+        console.warn(`[APIFY] Perfil @${itemHandle} não retornou dados válidos da Apify (${item.error || "sem followersCount"}: ${item.errorDescription || "sem detalhes"}). Dados existentes preservados.`);
+        continue;
       }
 
-      const matched = allInfluencers.find(inf => {
-        const localNorm = normalizeUrl(inf.link_perfil);
-        const itemUrl = item.instagramUrl || item.tiktokUrl || item.youtubeUrl || item.twitchUrl || item.facebookUrl || item.url || item.link || item.link_perfil || item.instagram_url;
-        const itemNorm = itemUrl ? normalizeUrl(itemUrl) : "";
-        
-        if (localNorm && itemNorm && (localNorm.includes(itemNorm) || itemNorm.includes(localNorm))) {
-          return true;
+      foundHandles.add(itemHandle);
+
+      const followersCount = Number(item.followersCount) || 0;
+      let fotoUrl = profile.foto_perfil_url || undefined;
+
+      if (item.profilePicUrl) {
+        try {
+          fotoUrl = await downloadAndUploadProfilePic(profile.id, item.profilePicUrl);
+        } catch (picErr: any) {
+          console.warn(`[APIFY] Falha ao baixar/uploadar foto para @${itemHandle}. Mantendo foto atual.`, picErr.message);
         }
+      }
 
-        const localHandle = getHandle(inf.link_perfil);
-        const itemHandle = item.username || item.handle || item.ownerUsername || item.id || (itemUrl ? getHandle(itemUrl) : "");
-        if (localHandle && itemHandle && localHandle === String(itemHandle).toLowerCase().replace("@", "").trim()) {
-          return true;
-        }
+      const fields: { seguidores: number; foto_perfil_url?: string; nome_completo?: string } = {
+        seguidores: followersCount,
+        foto_perfil_url: fotoUrl
+      };
 
-        return false;
-      });
+      // Only fill nome_completo if it's currently empty — never overwrite a manually typed name.
+      if (!profile.nome_completo && item.fullName) {
+        fields.nome_completo = item.fullName;
+      }
 
-      if (matched) {
-        const newClass = classifyInfluencer(followersCount);
-        const profilePic = item.profilePicUrl || item.profilePicUrlHD || item.profilePicUrlHd || item.profile_pic_url || item.avatar || item.avatarUrl || item.avatar_url || (item.authorMeta && item.authorMeta.avatar) || (item.author && item.author.avatar) || (item.owner && item.owner.profile_pic_url);
-        
-        let storagePhotoUrl = matched.foto_url;
-        
-        if (profilePic && profilePic.trim() !== "") {
-          try {
-            storagePhotoUrl = await downloadAndUploadProfilePic(matched.id, profilePic);
-          } catch (picErr: any) {
-            console.warn(`[APIFY] Falha ao baixar/uploadar foto original do Instagram para ${matched.nome}. Mantendo foto atual.`, picErr.message);
-          }
-        }
-
-        updates.push({
-          id: matched.id,
-          seguidores: followersCount,
-          classificacao: newClass,
-          foto_url: storagePhotoUrl
-        });
+      try {
+        await applyApifySyncResult(profile.id, fields);
+        updatedCount++;
+      } catch (updateErr: any) {
+        console.error(`[APIFY] Falha ao salvar sincronização para @${itemHandle}:`, updateErr.message);
       }
     }
 
-    let updatedCount = 0;
-    if (updates.length > 0) {
-      updatedCount = await dbUpdateApifyMatches(updates);
+    const notFound = profiles.filter(p => p.handle_normalizado && !foundHandles.has(p.handle_normalizado));
+    if (notFound.length > 0) {
+      console.warn(
+        `[APIFY] ${notFound.length} perfil(is) não encontrado(s) pela Apify (privado, removido ou username incorreto). Dados existentes preservados:`,
+        notFound.map(p => p.handle_normalizado).join(", ")
+      );
     }
 
     currentSync.progress = 100;
@@ -396,10 +257,12 @@ export async function runApifySync() {
   }
 }
 
-// Background cron scheduler to run automatically once a day at midnight ("0 0 * * *")
+// Background cron scheduler to run automatically once a day at midnight ("0 0 * * *").
+// This is intentionally the only automatic trigger — the app never fires a sync on
+// server startup or on public storefront visits, to avoid burning Apify credits.
 export function setupBackgroundCron() {
   console.log("[CRON] Inicializando agendador de tarefas em segundo plano (Serviço de Atualização)...");
-  
+
   cron.schedule("0 0 * * *", async () => {
     console.log("[CRON] Iniciando atualização automática diária de seguidores e fotos de perfil...");
     try {

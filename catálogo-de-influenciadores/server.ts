@@ -2,21 +2,23 @@ import "dotenv/config";
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { 
-  dbGetAll, 
-  dbCreate, 
-  dbToggleFavorite, 
-  dbDelete, 
+import {
+  dbGetAll,
+  dbCreate,
+  dbToggleFavorite,
+  dbDelete,
   dbBulkInsert,
-  dbUpdateApifyMatches,
   dbUpdate
-} from "./src/lib/dbFallback.js";
+} from "./src/lib/db.js";
 import {
   getCurrentSyncState,
   runApifySync,
   setupBackgroundCron,
   resetSyncState
 } from "./src/services/instagramUpdater.js";
+import { supabaseStorage, supabaseAuth } from "./src/lib/supabase.js";
+
+const USER_AVATARS_BUCKET = "user-avatars";
 
 const app = express();
 const PORT = 3000;
@@ -31,18 +33,13 @@ function classifyInfluencer(followers: number): string {
   return "Mega influenciador";
 }
 
-// Ensure database is seeded/initialized on fallback if primary Firestore fails
+// Ensure database is seeded on first run against an empty Supabase table
 async function ensureDatabaseSeeded() {
   await dbGetAll();
 }
 
 // Brute force protection state
 const loginAttempts: Record<string, { count: number; lockUntil: number }> = {};
-
-
-// Admin credentials
-const ADMIN_EMAIL = "max.rost@supernova.art.br";
-const ADMIN_PASSWORD = "@Max608421";
 
 // -----------------------------------------------------
 // API ENDPOINTS
@@ -197,8 +194,8 @@ app.post("/api/influencers/bulk", async (req, res) => {
   }
 });
 
-// Admin login endpoint with Brute Force Protection
-app.post("/api/admin/login", (req, res) => {
+// Platform login (Supabase Auth), with brute-force protection by IP
+app.post("/api/admin/login", async (req, res) => {
   const { email, password } = req.body;
   const ip = req.ip || "unknown";
 
@@ -212,31 +209,110 @@ app.post("/api/admin/login", (req, res) => {
     });
   }
 
-  if (email === ADMIN_EMAIL && password === ADMIN_PASSWORD) {
-    // Reset attempts on success
+  const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password });
+
+  if (!error && data.user) {
     delete loginAttempts[ip];
     return res.json({ success: true, token: "session_token_supernova_max_rost" });
+  }
+
+  // Record failure
+  if (!loginAttempts[ip]) {
+    loginAttempts[ip] = { count: 1, lockUntil: 0 };
   } else {
-    // Record failure
-    if (!loginAttempts[ip]) {
-      loginAttempts[ip] = { count: 1, lockUntil: 0 };
-    } else {
-      loginAttempts[ip].count += 1;
-    }
+    loginAttempts[ip].count += 1;
+  }
 
-    if (loginAttempts[ip].count >= 5) {
-      loginAttempts[ip].lockUntil = Date.now() + 300 * 1000; // 5 minute lock
-      return res.status(429).json({
-        success: false,
-        error: "Bloqueado por segurança. Limite de tentativas excedido (5 min de bloqueio)."
-      });
-    }
-
-    const restAttempts = 5 - loginAttempts[ip].count;
-    res.status(401).json({
+  if (loginAttempts[ip].count >= 5) {
+    loginAttempts[ip].lockUntil = Date.now() + 300 * 1000; // 5 minute lock
+    return res.status(429).json({
       success: false,
-      error: `Credenciais incorretas. Você tem mais ${restAttempts} tentativas.`
+      error: "Bloqueado por segurança. Limite de tentativas excedido (5 min de bloqueio)."
     });
+  }
+
+  const restAttempts = 5 - loginAttempts[ip].count;
+  res.status(401).json({
+    success: false,
+    error: `Credenciais incorretas. Você tem mais ${restAttempts} tentativas.`
+  });
+});
+
+// Change own password (Meu Perfil) — verifies the current password via Supabase Auth,
+// then sets the new one via the Admin API.
+app.post("/api/admin/change-password", async (req, res) => {
+  const { email, currentPassword, newPassword } = req.body;
+
+  if (!newPassword || newPassword.length < 6) {
+    return res.status(400).json({ success: false, error: "A nova senha deve ter pelo menos 6 caracteres." });
+  }
+
+  const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password: currentPassword });
+  if (error || !data.user) {
+    return res.status(401).json({ success: false, error: "Senha atual incorreta." });
+  }
+
+  const { error: updateError } = await supabaseAuth.auth.admin.updateUserById(data.user.id, { password: newPassword });
+  if (updateError) {
+    return res.status(500).json({ success: false, error: updateError.message });
+  }
+
+  res.json({ success: true, message: "Senha atualizada com sucesso." });
+});
+
+// Create a new team member account (Adicionar Admin) via Supabase Auth Admin API
+app.post("/api/admin/create-account", async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !email.includes("@")) {
+    return res.status(400).json({ success: false, error: "Insira um endereço de e-mail válido." });
+  }
+  if (!password || password.length < 6) {
+    return res.status(400).json({ success: false, error: "A senha deve conter pelo menos 6 caracteres." });
+  }
+
+  const { data, error } = await supabaseAuth.auth.admin.createUser({ email, password, email_confirm: true });
+
+  if (error) {
+    if (error.message.toLowerCase().includes("already been registered") || (error as any).code === "email_exists") {
+      return res.status(409).json({ success: false, error: "Já existe uma conta com este e-mail." });
+    }
+    return res.status(500).json({ success: false, error: error.message });
+  }
+
+  res.json({ success: true, user: { id: data.user?.id, email: data.user?.email } });
+});
+
+// Upload/replace own admin profile photo (Meu Perfil) — base64 data URL in the body
+app.post("/api/admin/avatar", async (req, res) => {
+  try {
+    const { email, imageBase64 } = req.body;
+    if (!email || !imageBase64) {
+      return res.status(400).json({ success: false, error: "Dados de imagem ausentes." });
+    }
+
+    const matches = imageBase64.match(/^data:(image\/\w+);base64,(.+)$/);
+    if (!matches) {
+      return res.status(400).json({ success: false, error: "Formato de imagem inválido." });
+    }
+    const contentType = matches[1];
+    const buffer = Buffer.from(matches[2], "base64");
+    const ext = contentType.split("/")[1] || "jpg";
+    const cleanEmail = email.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const storagePath = `admins/${cleanEmail}.${ext}`;
+
+    const { error: uploadError } = await supabaseStorage.storage
+      .from(USER_AVATARS_BUCKET)
+      .upload(storagePath, buffer, { contentType, upsert: true });
+
+    if (uploadError) {
+      return res.status(500).json({ success: false, error: uploadError.message });
+    }
+
+    const { data } = supabaseStorage.storage.from(USER_AVATARS_BUCKET).getPublicUrl(storagePath);
+    res.json({ success: true, url: `${data.publicUrl}?t=${Date.now()}` });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -293,17 +369,9 @@ async function startServer() {
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[SYSTEM] Server listening on http://0.0.0.0:${PORT}`);
     console.log(`[SYNC] Manual synchronization engine ready.`);
+    // Apify only runs via the daily cron below or the admin's manual "Sincronizar" button —
+    // never automatically on server startup or on public storefront visits, to control cost.
     setupBackgroundCron();
-
-    // Execução Imediata na inicialização do servidor (não bloqueante)
-    console.log(`[SYNC] Iniciando sincronização inicial imediata de dados do Instagram/Apify...`);
-    runApifySync()
-      .then(result => {
-        console.log(`[SYNC] Sincronização imediata concluída com sucesso! ${result.updatedCount} influenciadores atualizados.`);
-      })
-      .catch(err => {
-        console.error(`[SYNC] Erro na sincronização imediata inicial:`, err.message || err);
-      });
   });
 }
 

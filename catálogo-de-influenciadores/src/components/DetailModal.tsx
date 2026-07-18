@@ -58,29 +58,29 @@ export default function DetailModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-end select-none">
       {/* Backdrop */}
-      <div 
-        className="absolute inset-0 bg-[#141414]/60 backdrop-blur-xs transition-opacity duration-300"
+      <div
+        className="absolute inset-0 bg-ink/60 backdrop-blur-xs transition-opacity duration-300"
         onClick={onClose}
       />
 
       {/* Slide Drawer Content with hardware acceleration */}
-      <div 
+      <div
         style={{ transform: "translate3d(0, 0, 0)" }}
-        className="relative w-full max-w-lg h-full bg-[#E4E3E0] border-l border-[#141414] shadow-2xl flex flex-col justify-between z-10 animate-slide-in"
+        className="relative w-full max-w-lg h-full bg-canvas border-l border-line shadow-soft flex flex-col justify-between z-10 animate-slide-in"
       >
         {/* Header Block */}
-        <div className="p-6 border-b border-[#141414] flex justify-between items-center bg-[#DCDAD7]">
+        <div className="p-6 border-b border-line flex justify-between items-center bg-canvas-subtle">
           <div>
-            <span className="text-[9px] uppercase tracking-widest font-bold opacity-60 font-mono block">
+            <span className="text-[9px] uppercase tracking-widest font-medium text-ink-soft font-sans block">
               Dossiê Corporativo
             </span>
-            <span className="text-sm font-bold tracking-tight text-[#141414]">
+            <span className="text-sm font-semibold tracking-tight text-ink">
               ID: {influencer.id.slice(0, 8)}...
             </span>
           </div>
-          <button 
+          <button
             onClick={onClose}
-            className="w-8 h-8 rounded-full border border-[#141414] flex items-center justify-center hover:bg-[#141414] hover:text-white transition-colors cursor-pointer"
+            className="w-8 h-8 rounded-full border border-line flex items-center justify-center hover:bg-ink hover:text-white transition-colors duration-150 cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -88,12 +88,12 @@ export default function DetailModal({
 
         {/* Info Area */}
         <div className="flex-1 overflow-y-auto p-8 space-y-8">
-          
+
           {/* Avatar and Main Info */}
           <div className="flex gap-6 items-center">
-            <div className="w-20 h-20 rounded-full bg-white border border-[#141414] overflow-hidden flex items-center justify-center text-3xl font-serif italic font-bold shadow-md relative">
+            <div className="w-20 h-20 rounded-full bg-canvas-muted border border-line overflow-hidden flex items-center justify-center text-3xl font-sans italic font-semibold shadow-soft relative">
               {!(influencer.foto_url && influencer.foto_url.trim() !== "" && (influencer.foto_url.startsWith("http://") || influencer.foto_url.startsWith("https://"))) || imgError ? (
-                <span className="text-3xl font-serif italic font-bold text-[#141414]">
+                <span className="text-3xl font-sans italic font-semibold text-ink">
                   {influencer.nome.slice(0, 2).toUpperCase()}
                 </span>
               ) : (
@@ -109,28 +109,28 @@ export default function DetailModal({
               )}
             </div>
             <div className="space-y-1">
-              <h2 className="text-2xl font-serif font-bold text-[#141414] tracking-tight leading-tight">
+              <h2 className="text-2xl font-sans font-semibold text-ink tracking-tight leading-tight">
                 {influencer.nome}
               </h2>
               <div className="flex items-center gap-2">
-                <a 
+                <a
                   href={influencer.link_perfil}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-[#E30613] text-sm font-mono font-bold hover:underline inline-flex items-center gap-1"
+                  className="text-accent text-sm font-sans font-semibold hover:underline inline-flex items-center gap-1"
                 >
                   <span>Ver Instagram</span>
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
-                <span className="text-[#141414]/30">|</span>
+                <span className="text-line">|</span>
                 <button
                   onClick={() => onToggleFavorite(influencer.id)}
-                  className="text-xs font-bold uppercase inline-flex items-center gap-1 hover:text-[#E30613]"
+                  className="text-xs font-semibold uppercase inline-flex items-center gap-1 hover:text-accent transition-colors duration-150"
                 >
-                  <Heart 
-                    className="w-4 h-4" 
-                    fill={influencer.is_favorito ? "#E30613" : "transparent"} 
-                    stroke={influencer.is_favorito ? "#E30613" : "#141414"} 
+                  <Heart
+                    className="w-4 h-4"
+                    fill={influencer.is_favorito ? "#E30613" : "transparent"}
+                    stroke={influencer.is_favorito ? "#E30613" : "#18181B"}
                   />
                   <span>{influencer.is_favorito ? "Favoritado" : "Salvar de Interesse"}</span>
                 </button>
@@ -140,14 +140,14 @@ export default function DetailModal({
 
           {/* Categories and Badges */}
           <div className="flex flex-wrap gap-2">
-            <span className="px-3 py-1 bg-white border border-[#141414] text-xs font-bold uppercase tracking-wider rounded-sm text-[#141414]">
+            <span className="px-3 py-1 bg-canvas-subtle border border-line text-xs font-semibold uppercase tracking-wider rounded-md text-ink">
               {influencer.categoria_sobre}
             </span>
-            <span className="px-3 py-1 bg-[#141414] text-[#E4E3E0] text-xs font-bold uppercase tracking-wider rounded-sm">
+            <span className="px-3 py-1 bg-ink text-white text-xs font-semibold uppercase tracking-wider rounded-md">
               {influencer.classificacao}
             </span>
             {influencer.grupo === "concorrentes" && (
-              <span className="px-3 py-1 bg-[#E30613]/10 border border-[#E30613]/20 text-xs font-mono font-bold uppercase tracking-wider rounded-sm text-[#E30613]">
+              <span className="px-3 py-1 bg-accent/10 border border-accent/20 text-xs font-sans font-semibold uppercase tracking-wider rounded-md text-accent">
                 Concorrente
               </span>
             )}
@@ -155,43 +155,43 @@ export default function DetailModal({
 
           {/* Detailed Performance Metric Grid */}
           <div className="space-y-4">
-            <h4 className="text-[11px] font-bold uppercase tracking-wider opacity-60 font-mono">
+            <h4 className="text-[11px] font-semibold uppercase tracking-wider text-ink-soft font-sans">
               MÉTRICAS DE PERFORMANCE
             </h4>
-            
+
             <div className="grid grid-cols-2 gap-4">
-              <div className="bg-white border border-[#141414] p-4 rounded-xs">
-                <span className="text-[10px] text-gray-500 uppercase block font-mono">Seguidores Reais</span>
-                <span className="text-xl font-mono font-bold text-[#141414]">
+              <div className="bg-canvas-subtle border border-line rounded-lg p-4">
+                <span className="text-[10px] text-ink-soft uppercase block font-sans">Seguidores Reais</span>
+                <span className="text-xl font-sans font-semibold text-ink">
                   {formatFollowers(influencer.seguidores)}
                 </span>
-                <span className="text-[8px] text-gray-400 block mt-1">Auditado por Apify API</span>
+                <span className="text-[8px] text-ink-soft block mt-1">Auditado por Apify API</span>
               </div>
 
-              <div className="bg-white border border-[#141414] p-4 rounded-xs">
-                <span className="text-[10px] text-gray-500 uppercase block font-mono">Público-Alvo Prioritário</span>
-                <span className="text-sm font-bold uppercase text-[#141414] mt-1 block truncate">
+              <div className="bg-canvas-subtle border border-line rounded-lg p-4">
+                <span className="text-[10px] text-ink-soft uppercase block font-sans">Público-Alvo Prioritário</span>
+                <span className="text-sm font-semibold uppercase text-ink mt-1 block truncate">
                   {influencer.publico_alvo || "Geral"}
                 </span>
-                <span className="text-[8px] text-gray-400 block mt-1">Nicho / Persona Principal</span>
+                <span className="text-[8px] text-ink-soft block mt-1">Nicho / Persona Principal</span>
               </div>
             </div>
           </div>
 
           {/* Core System Notes */}
-          <div className="border-t border-[#141414]/10 pt-6 space-y-3">
-            <div className="flex items-start gap-2.5 text-xs text-[#141414]/80">
+          <div className="border-t border-line pt-6 space-y-3">
+            <div className="flex items-start gap-2.5 text-xs text-ink-soft">
               <ShieldCheck className="w-4.5 h-4.5 text-green-600 shrink-0 mt-0.5" />
               <div>
-                <span className="font-bold block">Tolerância a falhas ativada</span>
+                <span className="font-semibold block text-ink">Tolerância a falhas ativada</span>
                 Este influenciador possui histórico estável de conformidade comercial. Perfil qualificado para campanhas Enterprise de missão crítica.
               </div>
             </div>
 
-            <div className="flex items-start gap-2.5 text-xs text-[#141414]/80">
+            <div className="flex items-start gap-2.5 text-xs text-ink-soft">
               <Award className="w-4.5 h-4.5 text-yellow-600 shrink-0 mt-0.5" />
               <div>
-                <span className="font-bold block">Reclassificação Automatizada</span>
+                <span className="font-semibold block text-ink">Reclassificação Automatizada</span>
                 O tier do influenciador é verificado após cada sincronização baseada nas faixas estritas de negócio (de Nano a Mega).
               </div>
             </div>
@@ -200,12 +200,12 @@ export default function DetailModal({
         </div>
 
         {/* System Footer Metadata */}
-        <div className="p-6 border-t border-[#141414] bg-[#DCDAD7] flex justify-between items-center text-[10px] font-mono text-[#141414]">
-          <span className="flex items-center gap-1.5 font-bold">
+        <div className="p-6 border-t border-line bg-canvas-subtle flex justify-between items-center text-[10px] font-sans text-ink-soft">
+          <span className="flex items-center gap-1.5 font-semibold text-ink">
             <Clock className="w-3.5 h-3.5" />
             Última Sincronização:
           </span>
-          <span className="font-bold opacity-80">
+          <span className="font-medium">
             {formatDate(influencer.updated_at)}
           </span>
         </div>
